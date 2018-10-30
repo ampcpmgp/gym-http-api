@@ -7,7 +7,8 @@ import six
 import argparse
 import sys
 import json
-
+import concurrent.futures
+import time
 
 import logging
 logger = logging.getLogger('werkzeug')
@@ -15,6 +16,19 @@ logger.setLevel(logging.ERROR)
 
 ########## Container for environments ##########
 class Envs(object):
+    def auto_render(self):
+        while True:
+            time.sleep(0.01)
+
+            if not self.renderable:
+                continue
+
+            if not self.last_instance_id:
+                continue
+
+            env = self._lookup_env(self.last_instance_id)
+            env.render()
+
     """
     Container and manager for the environments instantiated
     on this server.
@@ -28,6 +42,11 @@ class Envs(object):
     def __init__(self):
         self.envs = {}
         self.id_len = 8
+
+        self.renderable = False
+        self.last_instance_id = ''
+        self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        self.executor.submit(self.auto_render)
 
     def _lookup_env(self, instance_id):
         try:
@@ -62,16 +81,40 @@ class Envs(object):
         return env.observation_space.to_jsonable(obs)
 
     def step(self, instance_id, action, render):
-        env = self._lookup_env(instance_id)
         if isinstance( action, six.integer_types ):
             nice_action = action
         else:
             nice_action = np.array(action)
+
         if render:
-            env.render()
+            self.renderable = True
+        else:
+            self.renderable = False
+
+        env = self._lookup_env(instance_id)
+
         [observation, reward, done, info] = env.step(nice_action)
+
         obs_jsonable = env.observation_space.to_jsonable(observation)
         return [obs_jsonable, reward, done, info]
+
+    def auto_step(self, instance_id):
+        env = self._lookup_env(instance_id)
+        action = np.random.choice([0, 1])
+
+        for _ in range(10):
+            # 環境の初期化
+            env.reset()
+
+            for _ in range(200):
+                # CartPoleの描画
+                env.render()
+
+                action = np.random.choice([0, 1])
+                [_observation, _reward, done, _info] = env.step(action)
+
+                if done:
+                    break
 
     def get_action_space_contains(self, instance_id, x):
         env = self._lookup_env(instance_id)
@@ -126,14 +169,19 @@ class Envs(object):
 
     def monitor_start(self, instance_id, directory, force, resume, video_callable):
         env = self._lookup_env(instance_id)
+
         if video_callable == False:
             v_c = lambda count: False
         else:
             v_c = lambda count: count % video_callable == 0
+
+        self.last_instance_id = instance_id
         self.envs[instance_id] = gym.wrappers.Monitor(env, directory, force=force, resume=resume, video_callable=v_c) 
 
     def monitor_close(self, instance_id):
         env = self._lookup_env(instance_id)
+        self.last_instance_id = ''
+
         env.close()
 
     def env_close(self, instance_id):
@@ -258,6 +306,12 @@ def env_step(instance_id):
     [obs_jsonable, reward, done, info] = envs.step(instance_id, action, render)
     return jsonify(observation = obs_jsonable,
                     reward = reward, done = done, info = info)
+
+# cart-pole専用、確認用
+@app.route('/v1/envs/<instance_id>/auto_step/', methods=['POST'])
+def env_auto_step(instance_id):
+    envs.auto_step(instance_id)
+    return ('', 204)
 
 @app.route('/v1/envs/<instance_id>/action_space/', methods=['GET'])
 def env_action_space_info(instance_id):
